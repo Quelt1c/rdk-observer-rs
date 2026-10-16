@@ -4,9 +4,16 @@
 //! Protobuf output using the plans in ADRs 0001-0004.
 //!
 //! `process_*` will establish the targets to monitor. `process_discovery` will
-//! find candidates through full procfs scans and lifecycle events;
+//! find candidates through an initial procfs inventory, reconciliation every
+//! 30 seconds, and netlink process connector lifecycle events;
 //! `process_worker` will apply selection rules, maintain `process_registry`, and
 //! coordinate collection for registered PID/start-time identities.
+//!
+//! Startup will use `normal-observer-mode` without loading or attaching eBPF.
+//! Anomaly detection will activate targeted process or thread eBPF analysis in
+//! `forensic-observer-mode`, while normal discovery and collection continue.
+//! `runtime` will coordinate forensic sessions and release eBPF resources when
+//! sessions end, following ADR-0003.
 //!
 //! `collector_*` will gather measurements for individual registered targets, a
 //! full pass over the selected process list, or system totals, according to

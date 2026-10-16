@@ -3,7 +3,21 @@
 //! This module will receive configuration built from input parameters and start
 //! the required Tokio workers. Process monitoring will use `process_discovery`
 //! and `process_worker` to establish and maintain targets in `process_registry`.
-//! Available event readers will be attached before initial discovery scans.
+//! Startup will use `normal-observer-mode`: subscribe to available netlink
+//! process connector events before the initial procfs inventory scan and keep
+//! reconciliation scans running every 30 seconds. No eBPF programs will be
+//! loaded or attached in normal mode.
+//!
+//! Only anomaly triggers will activate `forensic-observer-mode`. The runtime
+//! will validate process or thread identities and coordinate targeted Aya/eBPF
+//! sessions under configured capture duration and resource limits. Netlink
+//! discovery, reconciliation, and routine collectors will continue throughout.
+//! Coalesce repeated triggers and release session resources on completion,
+//! target exit, failed initialization, or shutdown, retaining shared resources
+//! while other sessions need them. Return to normal mode after all sessions end.
+//! If forensic capture is unavailable, report it and continue normal observation.
+//! Anomaly trigger sources, probes, and detailed session policies remain to be
+//! defined, following ADR-0003.
 //!
 //! Enabled workers will start in this order:
 //!
@@ -28,3 +42,19 @@
 //! The runtime will connect workers, provide shared concurrency limits, monitor
 //! failures, and manage startup and shutdown. Pending record handling and
 //! failure policies remain to be defined.
+
+/// Run the observer until shutdown.
+///
+/// This is the library entry point called by the executable. Worker startup,
+/// channels, observer mode transitions, and shutdown will be implemented here.
+///
+/// # Errors
+///
+/// Currently returns [`std::io::ErrorKind::Unsupported`] because the observer
+/// workers are not implemented. No monitoring or background tasks are started.
+pub fn run() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "observer workers are not implemented yet; no monitoring was started",
+    ))
+}
