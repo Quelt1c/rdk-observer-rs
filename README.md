@@ -66,7 +66,7 @@ stateDiagram-v2
     Normal --> Forensic: Anomaly detected for a process or thread
     Forensic: forensic-observer-mode
     Forensic: Continue normal observation + targeted eBPF capture
-    Forensic --> Normal: All forensic sessions ended; release eBPF resources
+    Forensic --> Normal: All forensic sessions ended, release eBPF resources
 ```
 
 ### Process targets
