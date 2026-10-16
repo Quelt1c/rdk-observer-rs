@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "rdk-observer"
+version = "0.1.0"
+dependencies = [
+ "rdk-observer-core",
+]
+
+[[package]]
 name = "rdk-observer-core"
 version = "0.1.0"
