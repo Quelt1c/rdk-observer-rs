@@ -16,8 +16,9 @@
 //!
 //! Scheduling options will include an independent system sampling frequency,
 //! per-process interval bounds, change thresholds, bounded jitter, and a shared
-//! procfs concurrency limit, following ADRs 0001-0003. Output options will select
-//! derived measurements and delivery to an external or local consumer.
+//! procfs concurrency limit, following ADRs 0001-0003. Collection options will
+//! select derived measurements, and output options will control record
+//! preparation.
 //! Thresholds and interval bounds will be chosen from measurements on target
 //! devices. Parameter parsing, validation, defaults, and the configuration
 //! format remain to be defined.

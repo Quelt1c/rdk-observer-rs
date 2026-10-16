@@ -4,8 +4,8 @@
 //! `prost-build` from shared `.proto` definitions. External and local consumers
 //! will use bindings generated from the same schema. Messages will represent
 //! timestamps, raw measurements, derived values, units, PID/start-time
-//! identities, and lifecycle events. The schema will distinguish system totals,
-//! individual process observations, and records from a full-list pass.
+//! identities. The schema will distinguish system totals, individual process
+//! observations, and records from a full-list pass.
 //!
 //! The schema will define stable field numbers and presence rules, reserving
 //! removed field numbers and names and distinguishing unavailable values from

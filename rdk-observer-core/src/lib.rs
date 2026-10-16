@@ -22,11 +22,12 @@
 //! passes will read their measurements. Neither will imply an atomic snapshot
 //! of the whole system.
 //!
-//! `output_*` will prepare observations and lifecycle records, encode them using
+//! `output_*` will prepare collected observations, encode them using
 //! `output_model` and `output_encoding`, and buffer them through `output_storage`.
-//! `output_worker` will route Protobuf records to an external collector or local
-//! processing consumer. `runtime` will start the workers selected by the input
-//! configuration, connect them, and manage their lifecycle.
+//! Process lifecycle events will drive discovery and collection coordination.
+//! Consumption or delivery of buffered records will be defined separately.
+//! `runtime` will start the workers selected by the input configuration, connect
+//! them, and manage their lifecycle.
 
 pub mod collector_cpu;
 pub mod collector_io;

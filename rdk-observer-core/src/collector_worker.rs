@@ -6,11 +6,17 @@
 //! list. System collection will read device-wide totals independently of process
 //! selection, following ADR-0001.
 //!
-//! `process_worker` will coordinate collection tasks for registered targets;
-//! `runtime` will manage system collection and the overall worker lifecycle.
+//! Tasks will receive start and stop instructions from `process_worker` for
+//! registered targets and report completion, target disappearance, and failures
+//! back to it. `runtime` will manage system collection and the overall worker
+//! lifecycle.
 //! Tasks will call the applicable `collector_*` functions and combine readings
 //! into timestamped observations, preserving raw values, units, process
 //! identities, and unavailable measurements.
+//! When configured, tasks will derive CPU utilization and I/O rates from
+//! consecutive valid samples with elapsed time between them. A first sample
+//! establishes a baseline; counter resets, missing targets, or identity changes
+//! invalidate affected deltas.
 //!
 //! Per-process tasks will use adaptive intervals and bounded jitter, following
 //! ADR-0002. Periodic and event-triggered reads will share a concurrency limit.

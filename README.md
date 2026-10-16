@@ -25,19 +25,21 @@ The observer will support the following process selection options:
 
 These options will allow deployments to choose between broad process monitoring and a selected subset. Normal observation will track processes; forensic observation may target individual threads within an anomalous process. System-wide resource totals will provide overall device context.
 
-## Program design
+## Architecture
+
+![RDK Observer architecture stack](docs/architecture/diagrams/rdk-observer-stack.png)
 
 The program separates target management, measurement collection, and output handling:
 
 | Modules | Responsibility |
 | --- | --- |
-| `process_*` | Discover candidate processes, select targets, and maintain the process registry. |
-| `collector_*` | Collect measurements for registered targets or system totals. |
-| `output_*` | Prepare observations, encode Protobuf, buffer records, and route them to a consumer. |
-| `config` | Represent input options, including target selection, resources, sampling, forensic capture policy, and output destination. |
+| `process_*` | Discover candidate processes, select targets, maintain the process registry, and coordinate process collection. |
+| `collector_*` | Collect measurements for registered targets or system totals, calculate configured derived values, and report collection status. |
+| `output_*` | Prepare observation records, encode Protobuf, and store encoded records in the output buffer. |
+| `config` | Represent input options, including target selection, resources, sampling, forensic capture policy, and record preparation. |
 | `runtime` | Start and connect the required Tokio workers, manage their lifecycle, and coordinate observer mode transitions. |
 
-The entry point will eventually read input parameters, build and validate configuration, and launch the configured `runtime`. Configuration will determine which processes and resources to monitor, the collection scope, and whether records go to an external or local consumer.
+The entry point will eventually read input parameters, build and validate configuration, and launch the configured `runtime`. Configuration will determine which processes and resources to monitor, the collection scope, and which raw and derived measurements to include in records.
 
 ```mermaid
 flowchart TD
@@ -45,10 +47,10 @@ flowchart TD
     Runtime -->|1. Start process workers| Processes["process_*: discovery and registry"]
     Runtime -->|2. Start collection workers| Collectors["collector_*: measurement collection"]
     Runtime -->|3. Initialize storage and start output worker| Output["output_*: preparation, encoding, and buffering"]
-    Processes -->|Registered targets| Collectors
-    Processes -->|Lifecycle records| Output
+    Processes -->|Start and stop process collection| Collectors
+    Collectors -->|Collection status| Processes
     Collectors -->|Timestamped observations| Output
-    Output -->|Protobuf records| Consumer["External collector or local consumer"]
+    Output -->|Encoded Protobuf records| Buffer["output_storage: in-memory ring buffer"]
 ```
 
 ### Observer modes
@@ -59,9 +61,9 @@ When an anomaly is detected, `forensic-observer-mode` will add eBPF monitoring f
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Normal
+    [*] --> Normal: Startup procfs inventory
     Normal: normal-observer-mode
-    Normal: Startup procfs inventory + reconciliation every 30 seconds
+    Normal: Procfs reconciliation every 30 seconds
     Normal: Netlink lifecycle events + procfs measurements
     Normal --> Forensic: Anomaly detected for a process or thread
     Forensic: forensic-observer-mode
@@ -73,27 +75,27 @@ stateDiagram-v2
 
 `process_discovery` will subscribe to netlink lifecycle notifications before the startup inventory scan when the connector is available. It will forward scan results and events to `process_worker`, which will deduplicate them by process identity. Reconciliation every 30 seconds will discover missed processes and remove confirmed stale entries. Inventory scans identify targets; their cadence is independent of resource sampling intervals.
 
-`process_worker` will apply selection rules, update `process_registry`, and coordinate collection for the selected targets. The registry will identify each process by PID and start time so PID reuse does not attach an old process's history to a new one. The coordinator will start and stop per-process collection tasks, combine repeated collection requests, and send lifecycle records to the output worker.
+`process_worker` will apply selection rules, update `process_registry`, and coordinate collection for the selected targets. The registry will identify each process by PID and start time so PID reuse does not attach an old process's history to a new one. The coordinator will use process lifecycle events to start and stop per-process collection tasks and combine repeated collection requests. Collection tasks will report completion, target disappearance, and failures to the coordinator so it can reconcile collection state with the registry.
 
 Netlink events include thread identifiers and thread-group identifiers, so a thread exit must not be treated as the exit of the whole process. Delayed events must not remove a newer process that reused a PID. If netlink is unavailable or loses events, discovery will continue through procfs reconciliation and report reduced lifecycle coverage; eBPF will remain reserved for anomaly-triggered forensics. Short-lived processes may be missed when events are unavailable or lost. [ADR-0003](docs/architecture/adr/0003-trigger-process-capture-with-bpf-events.md) defines discovery, recovery, and forensic mode boundaries.
 
 ### Measurement collection
 
-`collector_worker` tasks will use the registered targets and enabled resource collectors. Configuration will select collection for an individual process, a full pass over the selected process list, system totals, or a combination.
+`collector_worker` tasks will use the registered targets and enabled resource collectors. They will receive start and stop instructions from `process_worker` and report collection status back to it. Configuration will select collection for an individual process, a full pass over the selected process list, system totals, or a combination. `runtime` will coordinate independent system collection.
 
 Resource modules such as `collector_cpu`, `collector_memory`, and `collector_io` will provide collection functions. For example, the CPU collector will support system counters from `/proc/stat` and per-PID counters from `/proc/<pid>/stat`. Per-process memory and I/O fields still need to be defined. Network and pressure collection are planned extensions; per-process measurements will require sources that support that attribution, and unavailable measurements will remain distinguishable from zero.
 
 Per-process tasks will use adaptive sampling intervals, bounded jitter, and a shared read concurrency limit. Full-list requests will be coordinated with active tasks to avoid duplicate reads. System totals will be sampled independently when requested.
 
-Collectors will send timestamped observations directly to `output_worker` through channels. A discovery scan identifies targets; a collection pass reads their measurements. A full process snapshot is a pass over the selected targets, not an atomic view of every process or the whole system.
+When configured, collection tasks will derive CPU utilization and I/O rates from consecutive valid samples. First samples establish baselines; counter resets or identity changes invalidate affected deltas. Collectors will send timestamped observations directly to `output_worker` through channels. A discovery scan identifies targets; a collection pass reads their measurements. A full process snapshot is a pass over the selected targets, not an atomic view of every process or the whole system.
 
 ### Output handling
 
-`output_worker` will receive resource observations and lifecycle records, preserving timestamps, process identities, raw values, units, and unavailable measurements. When configured, it will derive CPU utilization and I/O rates from consecutive valid samples. First samples establish baselines; counter resets or identity changes invalidate affected deltas.
+`output_worker` will receive collected observations, prepare Protobuf records, and store them in the output buffer. Record preparation will preserve timestamps, process identities, raw and derived values, units, and unavailable measurements. Process lifecycle events will remain within discovery and collection coordination.
 
 `output_model` will expose message types generated from shared Protobuf schemas, and `output_encoding` will encode and decode records using `prost`. `output_storage` will hold encoded records in a planned in-memory ring buffer capped at 500 KB (500,000 bytes), including buffer bookkeeping.
 
-The output worker will route buffered Protobuf records to the configured external collector or local processing consumer. Both will use the same schema. The transport, local consumer interface, batching, retry behavior, buffer overflow policy, channel backpressure, and pending-record handling during shutdown remain to be defined.
+Buffered Protobuf records will be available for an external collector or local processing consumer using the same schema. The component responsible for consuming or delivering buffered records and its interface remain to be defined separately from record preparation and storage. Buffer overflow policy, input channel backpressure, and pending-record handling during shutdown also remain to be defined.
 
 ### Runtime coordination
 
@@ -103,9 +105,9 @@ Startup will follow this order for the enabled workers:
 
 1. `process_*`: start discovery and target coordination, and establish the process registry.
 2. `collector_*`: start collection tasks for the registered targets and any requested system totals.
-3. `output_*`: initialize output storage and start the worker that prepares, buffers, and delivers Protobuf records.
+3. `output_*`: initialize output storage and start the worker that prepares and stores Protobuf records.
 
-Collection tasks will wait until the output worker is ready before producing observations. Lifecycle record delivery will also wait for output readiness, while process discovery continues tracking targets.
+Collection tasks will wait until the output worker is ready before producing observations. Process discovery and collection coordination will continue tracking targets while output initializes.
 
 ## Architecture decisions
 

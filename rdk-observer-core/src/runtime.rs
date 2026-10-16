@@ -23,21 +23,22 @@
 //!
 //! 1. `process_*`: start discovery and coordination to establish registered targets.
 //! 2. `collector_*`: start process collection tasks and requested system collection.
-//! 3. `output_*`: initialize storage and start observation preparation and delivery.
+//! 3. `output_*`: initialize storage and start observation preparation and encoding.
 //!
 //! Collection tasks will wait for output readiness before producing observations.
-//! Lifecycle record delivery will also wait for output readiness while discovery
-//! continues tracking targets.
+//! Discovery and collection coordination will continue tracking targets while
+//! output initializes.
 //!
 //! `process_worker` will coordinate collection for registered targets, using
 //! `collector_worker` tasks for individual processes or full-list collection
 //! requests. The runtime will start independent system collection when totals
 //! are requested. Collection will use only the enabled resource types.
 //!
-//! Measurements from collection tasks and lifecycle records from the process
-//! coordinator will be sent to a shared `output_worker` through channels. It
-//! will prepare Protobuf records, buffer them through `output_storage`, and route
-//! them to the configured external or local consumer.
+//! Collection tasks will exchange collection instructions and status with
+//! `process_worker` and send observations to `output_worker` through channels.
+//! The output worker will prepare Protobuf records and store them through
+//! `output_storage`. Consumption or delivery of buffered records will be
+//! defined separately.
 //!
 //! The runtime will connect workers, provide shared concurrency limits, monitor
 //! failures, and manage startup and shutdown. Pending record handling and

@@ -10,7 +10,7 @@
 //!
 //! Readings will retain timestamps, identities, raw counters, and units. Exited
 //! or replaced targets will not produce a valid sample for the original process.
-//! `output_worker` will derive CPU utilization from consecutive valid samples
+//! `collector_worker` will derive CPU utilization from consecutive valid samples
 //! when configured. A first sample will establish a baseline; counter resets or
 //! identity changes will invalidate the delta. System counters will provide
 //! context when system and process observations are both enabled.

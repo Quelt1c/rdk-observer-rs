@@ -24,8 +24,11 @@
 //! will not activate forensic mode. Target exit will also end its forensic
 //! session, following ADR-0003.
 //!
-//! Lifecycle records will be sent to `output_worker` once it is ready, while
-//! discovery continues tracking targets during startup. Resource measurements
-//! will be collected by `collector_*` and sent directly to the same output
-//! worker. Coordination failures will be reported to the runtime; the handling
-//! policy remains to be defined.
+//! Collection tasks will report completion, target disappearance, and failures
+//! to this coordinator so it can reconcile collection state with the registry.
+//! Process lifecycle events will stay within discovery and collection
+//! coordination. Resource observations will be collected by `collector_*` and
+//! sent directly to `output_worker` for Protobuf preparation and storage.
+//! Discovery and coordination will continue while output initializes.
+//! Coordination failures will be reported to the runtime; the handling policy
+//! remains to be defined.
