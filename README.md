@@ -10,9 +10,9 @@ This repository is currently a project scaffold. The executable entry point exis
 cargo run --bin rdk-observer
 ```
 
-[`main.rs`](rdk-observer/main.rs) calls the library's `runtime::run()` function. It returns exit code 0 on success, or prints the runtime error to standard error and returns exit code 1 on failure. The runtime currently returns an explicit error stating that the observer workers are not implemented, so running the scaffold exits with code 1 and starts no monitoring.
+[`main.rs`](rdk-observer/src/main.rs) calls the library's `runtime::run()` function. It returns exit code 0 on success, or prints the runtime error to standard error and returns exit code 1 on failure. The runtime currently returns an explicit error stating that the observer workers are not implemented, so running the scaffold exits with code 1 and starts no monitoring.
 
-The `rdk-observer/` directory contains the executable entry point and the nested `rdk-observer-core/` library crate. All other Rust source files live in `rdk-observer/rdk-observer-core/src/`.
+The `rdk-observer/` directory contains the executable entry point and the nested `rdk-observer-core/` library crate. All other Rust source files live in `rdk-observer-core/src/`.
 
 Argument parsing, configuration loading, and logging initialization will be added to `main.rs` when their interfaces are defined. Worker orchestration, observer mode transitions, and shutdown belong in `runtime.rs`.
 

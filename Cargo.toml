@@ -1,5 +1,5 @@
 [workspace]
-members = ["rdk-observer", "rdk-observer/rdk-observer-core"]
+members = ["rdk-observer", "rdk-observer-core"]
 resolver = "2"
 
 [workspace.package]
