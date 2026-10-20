@@ -44,18 +44,8 @@
 //! failures, and manage startup and shutdown. Pending record handling and
 //! failure policies remain to be defined.
 
-/// Run the observer until shutdown.
-///
-/// This is the library entry point called by the executable. Worker startup,
-/// channels, observer mode transitions, and shutdown will be implemented here.
-///
-/// # Errors
-///
-/// Currently returns [`std::io::ErrorKind::Unsupported`] because the observer
-/// workers are not implemented. No monitoring or background tasks are started.
-pub fn run() -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "observer workers are not implemented yet; no monitoring was started",
-    ))
+use crate::process_worker::start_process_worker;
+
+pub async fn run() {
+    start_process_worker().await;
 }
