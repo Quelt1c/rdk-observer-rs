@@ -8,7 +8,7 @@ Proposed
 
 The observer may track many processes at once. Sampling every process on the same fixed timer could cause bursts of procfs reads, CPU work, and records sent to the backend. Processes also change at different rates, so a single sampling frequency would either miss short-lived changes or spend unnecessary work on stable processes.
 
-Processes can exit between discovery and sampling, and Linux can reuse a PID for a different process.
+Processes can exit between discovery and sampling, and Linux can reuse a PID for a different process. Resource sampling intervals are independent of the 30-second discovery reconciliation cadence in ADR-0003.
 
 ## Decision
 
@@ -28,6 +28,8 @@ Treat the first snapshot as a baseline. If the process exits, its start time cha
 
 Independent workers keep scheduling state local to each process. Jitter spreads procfs reads over time, while the shared concurrency limit caps the work that can happen at once. Adaptive intervals reserve more samples for changing processes without allowing stable processes to go unobserved indefinitely.
 
+Accessing `/proc/<pid>/...` directly is efficient when the coordinator already knows which PIDs to monitor because each worker reads only the files needed for its process. This avoids repeatedly enumerating and parsing the entire `/proc` process tree for every sample, so targeted per-PID observations can run more frequently than process discovery and reconciliation scans. Full procfs inventory scans run at startup and every 30 seconds for reconciliation; netlink connector events keep the process set current between scans, as described in ADR-0003. These workers continue during forensic sessions, when anomaly-triggered eBPF monitoring adds detail for selected processes or threads.
+
 ## Consequences
 
 ### Positive
@@ -46,4 +48,4 @@ Independent workers keep scheduling state local to each process. Jitter spreads 
 
 - [Tokio interval and missed tick behavior](https://docs.rs/tokio/latest/tokio/time/fn.interval.html)
 - [Linux kernel documentation: procfs process statistics](https://docs.kernel.org/filesystems/proc.html)
-- [ADR-0003: Trigger Process Capture with Aya and BPF Events](0003-trigger-process-capture-with-bpf-events.md)
+- [ADR-0003: Discover Processes with procfs and Netlink; Reserve eBPF for Forensics](0003-trigger-process-capture-with-bpf-events.md)
