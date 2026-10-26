@@ -2,7 +2,7 @@
 
 `rdk-observer-rs` is a system process observer for RDK devices. Its goal is to discover processes, collect resource measurements, and prepare Protobuf records for an external collector or local processing consumer.
 
-This repository is currently a project scaffold. The executable entry point exists; the source modules document the intended design, while the workers and delivery mechanisms are not implemented yet.
+The executable entry point and observation data types are implemented. The Protobuf schema, encoding/decoding, process discovery, resource collectors, workers, buffering, and delivery remain a project scaffold documenting the intended design.
 
 ## Problem solved
 
@@ -22,7 +22,7 @@ cargo run --bin rdk-observer
 
 [`main.rs`](rdk-observer/src/main.rs) calls the library's `runtime::run()` function. It returns exit code 0 on success, or prints the runtime error to standard error and returns exit code 1 on failure. The runtime currently returns an explicit error stating that the observer workers are not implemented, so running the scaffold exits with code 1 and starts no monitoring.
 
-The `rdk-observer/` directory contains the executable entry point and the nested `rdk-observer-core/` library crate. All other Rust source files live in `rdk-observer-core/src/`.
+The workspace contains the `rdk-observer/` executable crate and the `rdk-observer-core/` library crate. Core modules live in `rdk-observer-core/src/`.
 
 Argument parsing, configuration loading, and logging initialization will be added to `main.rs` when their interfaces are defined. Worker orchestration, observer mode transitions, and shutdown belong in `runtime.rs`.
 
@@ -64,10 +64,10 @@ Resource monitors must attribute observations to the stable process identity (`P
 ### DRAM resource management
 
 - Monitor total, available, and used DRAM.
-- Track per-process RSS, PSS, private memory, shared memory, and swap usage.
+- Track per-process RSS, PSS, private memory, and shared memory.
 - Monitor page cache and kernel slab usage.
 - Track memory pressure using PSI.
-- Monitor page faults, reclaim, swap, and other memory activity where exposed.
+- Monitor page faults, reclaim, and other memory activity where exposed.
 - Detect memory growth, peaks, and potential out-of-memory conditions.
 
 ### Storage resource monitor
@@ -235,13 +235,23 @@ After an anomaly trigger, Aya will provide the Rust interface for loading target
 
 `output_worker` will receive collected observations, prepare Protobuf records, and store them in the output buffer. Record preparation will preserve timestamps, process identities, raw and derived values, units, and unavailable measurements. Process lifecycle events will remain within discovery and collection coordination.
 
-`output_model` will expose message types generated from shared Protobuf schemas, and `output_encoding` will encode and decode records using `prost`. `output_storage` will hold encoded records in a planned in-memory ring buffer capped at 500 KB (500,000 bytes), including buffer bookkeeping.
+`output_model` defines Rust records for process and system memory, CPU, and storage I/O observations. Each per-process collection task will emit independent records for its target. Every `ObservationRecord` carries a required `process_identity`, its own wall-clock and monotonic timestamps, and one resource payload. The payload contains measurements and optional derived values with explicit units; process identity is stored once at the observation level. Sampling multiple processes does not require a shared collection-pass identifier. Unavailable measurements use `None` rather than zero. `output_encoding` will map these records to generated Protobuf messages and encode and decode them using `prost`. `output_storage` will hold encoded records in a planned in-memory ring buffer capped at 500 KB (500,000 bytes), including buffer bookkeeping.
+
+The process output fields cover virtual/resident/proportional memory, user/system CPU ticks and optional CPU utilization, and storage bytes and read/write syscall counts. Storage records can also carry optional byte rates. Detailed I/O timings, logical I/O character counts, and cancelled writes are deferred.
+
+`SystemRecord` carries its own wall-clock and monotonic timestamps and a `SystemResourceRecord` payload, without a process identity. Its variants hold aggregate CPU counters from `/proc/stat`, physical memory totals and availability from `/proc/meminfo` converted to bytes, or a collection of block-device records from `/proc/diskstats`. CPU counters retain all ten time categories in clock ticks; guest counters overlap user/nice counters and must not be counted twice. Optional system CPU utilization uses 100% to represent all CPU capacity being busy. Each storage entry identifies its device by major/minor number and name and preserves completed read/write operation counts and raw 512-byte sector counts. These block operations are distinct from process I/O syscall counts. Device selection must avoid double-counting disks and partitions. Optional byte rates require two valid samples of the same device; first samples, resets, and device identity changes invalidate the baseline. These types define the output representation; system collection and rate calculation are not implemented yet. Network measurements remain outside the output model.
+
+`ResourceRecord::Threads(Vec<ThreadRecord>)` holds the collection of threads sampled for the process, including its main thread. Each entry carries its own TID/start-time identity, name, state, raw priority, nice value, last CPU number, voluntary/nonvoluntary context-switch counters, and optional CPU and storage measurements. The enclosing observation supplies the owning process identity and collection timestamp. The CPU and storage variants at the resource level describe the whole process; measurements inside a thread entry describe only that thread. Process and thread totals overlap and must not be added together. RSS and PSS remain at process level because threads share the address space. Thread counter baselines must reset when the process or thread instance changes. Threads can start or exit during enumeration, so the list is not an atomic snapshot or a complete lifecycle history. These types define the output representation; thread discovery and collection are not implemented yet.
+
+Process records carry both an optional `logical_label` for correlating the same component across restarts and an optional `security_label` containing the security module name and reported context. Discovery will resolve logical labels from configured selection rules or service metadata; security profiles can be mapped explicitly when they identify a component reliably. Neither label is required for a process instance to be recorded. PID and start time identify each instance within a boot and PID namespace, and CPU and I/O counter baselines must reset for a new instance even when its labels match the previous one. Security labels are metadata and may be shared by multiple processes or change during an instance's lifetime. Label resolution and security-context collection are not implemented yet.
 
 Buffered Protobuf records will be available for an external collector or local processing consumer using the same schema. The component responsible for consuming or delivering buffered records and its interface remain to be defined separately from record preparation and storage. Buffer overflow policy, input channel backpressure, and pending-record handling during shutdown also remain to be defined.
 
 ### Serialization and Protobuf encoding
 
-Observation records will use Protocol Buffers, as decided in [ADR-0004](docs/architecture/adr/0004-observation-record-format-decision.md). Shared `.proto` definitions will specify the schema. `prost-build` will generate Rust message types, and `prost` will encode and decode them.
+Observation records will use Protocol Buffers, as decided in [ADR-0004](docs/architecture/adr/0004-observation-record-format-decision.md). The shared schema and build-time message generation remain to be implemented. The schema will represent memory, CPU, storage, and collections of threads, preserving identities, timestamps, and the distinction between unavailable measurements and measured zero.
+
+The planned encoding flow is:
 
 ```text
 Shared .proto schema
@@ -259,30 +269,7 @@ Rust message types
     Protobuf bytes
 ```
 
-The original proposal included this illustrative metric message:
-
-```proto
-syntax = "proto3";
-
-message ProcessMetrics {
-    uint32 pid = 1;
-    optional float cpu = 2;
-    optional uint64 rss_kb = 3;
-    optional uint64 pss_kb = 4;
-    optional uint64 read_bytes = 5;
-    optional uint64 write_bytes = 6;
-}
-```
-
-This example is not the final record contract: the shared schema must also define timestamps, stable process identity including start time, units, field presence, and evolution rules. Optional measurements will distinguish unavailable values from zero.
-
-Once message types are generated, encoding with `prost` will follow this pattern:
-
-```rust
-use prost::Message;
-
-let buffer = metrics.encode_to_vec();
-```
+[output_encoding.rs](rdk-observer-core/src/output_encoding.rs) currently describes the planned conversion and encoding/decoding responsibilities. The implementation, public API, transport message boundaries, and batching remain to be defined. Conversion will preserve identities, timestamps, optional values, and thread collections. Keep schema field numbers stable; reserve removed field numbers and names before evolving the schema.
 
 Protobuf had the smallest payloads and fastest encoding and decoding in the recorded ADR-0004 benchmark cases. Those results motivate the format choice; performance still needs validation with the actual schema and workload on target devices.
 

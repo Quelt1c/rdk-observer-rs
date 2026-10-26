@@ -1,13 +1,16 @@
 //! Observation record preparation, encoding, and buffering worker.
 //!
-//! This module will run a worker started by `runtime` to receive measurements
+//! This module will run a worker started by `runtime` to receive process measurements
 //! from `collector_worker` tasks through channels. It will prepare records while
 //! preserving timestamps, PID/start-time identities, raw and derived
 //! measurements, units, and the distinction between unavailable values and zero.
 //!
 //! Collection tasks will calculate configured derived measurements before
-//! forwarding observations. System, per-process, and full-list observations
-//! will remain distinguishable and will not imply an atomic view.
+//! forwarding observations. Per-process tasks will emit independent records
+//! with their own timestamps and a required process identity. Thread observations
+//! will hold a collection of entries for that process, each with its own thread
+//! identity, metadata, and optional CPU/I/O measurements. Memory records will
+//! describe the whole process. Sampling several targets does not imply an atomic view.
 //!
 //! The worker will use `output_encoding` and `output_model` to encode observations
 //! as Protobuf, then queue them through `output_storage` in the 500 KB in-memory
