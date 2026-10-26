@@ -168,13 +168,14 @@ impl NetlinkProcessDiscoveryWorker {
         };
 
         for message in messages {
-            let Some(message) = message.ok() else {
-                continue;
-            };
-            let Some(payload) = message.get_payload() else {
-                continue;
-            };
-            self.process_message(payload.payload()).await;
+            match message {
+                Ok(e) => {
+                    if let Some(payload) = e.get_payload() {
+                        self.process_message(payload.payload()).await;
+                    };
+                }
+                Err(e) => error!("failed to parse message: {e}"),
+            }
         }
         Ok(())
     }
