@@ -53,12 +53,12 @@ use tracing::info;
 /// This is the library entry point called by the executable. Worker startup,
 /// channels, observer mode transitions, and shutdown will be implemented here.
 pub async fn run() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
 
     let mut join_set = JoinSet::new();
     join_set.spawn(ProcessWorker::run(tx));
 
     while let Some(event) = rx.recv().await {
-        info!("{:?}", event);
+        info!("{event:?}");
     }
 }

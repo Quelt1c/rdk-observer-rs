@@ -47,7 +47,7 @@ use tokio::select;
 use tokio::sync::watch::error::RecvError;
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::MissedTickBehavior;
-use tracing::{error, instrument, warn};
+use tracing::{error, info, instrument, warn};
 
 /// Interval at which whole process list is refreshed
 const PID_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
@@ -64,7 +64,7 @@ const UNVERIFIED_PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 const UNVERIFIED_PROCESS_COMMAND: &str = "(unverified)";
 
 /// Identities read by a reconciliation scan, see [scan_processes]
-type ScanResult = anyhow::Result<HashMap<ProcessId, Option<ProcessInfo>>>;
+type ScanResult = anyhow::Result<HashMap<ProcessId, Option<VerifiedProcessInfo>>>;
 
 /// Typed Process ID
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -77,8 +77,21 @@ impl Display for ProcessId {
     }
 }
 
+/// Typed Thread ID
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ThreadId {
+    pub pid: i32,
+    pub tid: i32,
+}
+
+impl Display for ThreadId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.tid, f)
+    }
+}
+
 /// Resolved process info
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ProcessInfo {
     pub pid: ProcessId,
     /// command name, might be after creation (fork -> comm)
@@ -87,6 +100,13 @@ pub struct ProcessInfo {
     pub start_time: u64,
     /// exit_code when `Ok`, exit_signal when `Err`
     pub exit_result: Option<Result<u32, u32>>,
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedProcessInfo {
+    info: ProcessInfo,
+    /// all process threads, empty set means data is not available
+    threads: HashSet<ThreadId>,
 }
 
 #[derive(Debug)]
@@ -98,19 +118,21 @@ struct UnverifiedProcessInfo {
 /// Process lifecycle event
 #[derive(Debug)]
 pub enum ProcessEvent {
-    Started(ProcessInfo),
-    Finished(ProcessInfo),
-    Unverified(ProcessInfo),
+    ProcessStarted(ProcessInfo),
+    ProcessFinished(ProcessInfo),
+    ProcessUnverified(ProcessInfo),
+    ThreadStarted(ThreadId),
+    ThreadFinished(ThreadId),
 }
 
 pub struct ProcessWorker {
     /// list of currently active processes
-    processes: HashMap<ProcessId, ProcessInfo>,
+    processes: HashMap<ProcessId, VerifiedProcessInfo>,
     /// list of unverified processes with /proc record missing (usually short-lived)
     unverified_processes: HashMap<ProcessId, UnverifiedProcessInfo>,
     /// real-time process discovery
     discovery: NetlinkProcessDiscovery,
-    /// pending events than require to be sent
+    /// pending events that require to be sent
     pending_events: Vec<ProcessEvent>,
     /// interval at which process list is fully updated
     refresh_interval: tokio::time::Interval,
@@ -121,6 +143,9 @@ pub struct ProcessWorker {
     /// processes updated by events while a scan is running,
     /// their state is newer than what the scan has read
     scan_touched: HashSet<ProcessId>,
+    /// processes finished before their main thread exit event was handled,
+    /// so a delayed event is not reported again as an unverified process
+    finished_processes: HashMap<ProcessId, Instant>,
 }
 
 impl ProcessWorker {
@@ -142,6 +167,7 @@ impl ProcessWorker {
             scans: Default::default(),
             scan_requested: false,
             scan_touched: Default::default(),
+            finished_processes: Default::default(),
         };
 
         loop {
@@ -172,7 +198,9 @@ impl ProcessWorker {
             }
 
             for event in this.pending_events.drain(..) {
-                let _ = events_tx.send(event).await;
+                if events_tx.send(event).await.is_err() {
+                    return info!("output tx channel is closed, stopping the worker");
+                }
             }
         }
     }
@@ -202,8 +230,11 @@ impl ProcessWorker {
         };
 
         match event {
+            NetlinkProcessEvent::Fork(e) if e.child_pid == e.child_tgid => {
+                self.handle_discovery_event_fork_process(e).await;
+            }
             NetlinkProcessEvent::Fork(e) => {
-                self.handle_discovery_event_fork(e).await;
+                self.handle_discovery_event_fork_thread(e);
             }
             NetlinkProcessEvent::Exec(e) => {
                 self.handle_discovery_event_exec(e).await;
@@ -218,15 +249,9 @@ impl ProcessWorker {
     }
 
     ////////////////////////////////////////////////////////////////////////////////
-    async fn handle_discovery_event_fork(&mut self, event: NetlinkProcessForkEvent) {
-        // new process is only started when pid equals to thread group id
-        // otherwise this event signals pthread_create + CLONE_THREAD (or similar)
-
-        if event.child_pid != event.child_tgid {
-            return;
-        }
-
+    async fn handle_discovery_event_fork_process(&mut self, event: NetlinkProcessForkEvent) {
         let process_id = ProcessId(event.child_tgid);
+
         if !self.scans.is_empty() {
             self.scan_touched.insert(process_id);
         }
@@ -247,7 +272,29 @@ impl ProcessWorker {
                 created_at: Instant::now(),
             },
         ) {
-            self.pending_events.push(ProcessEvent::Unverified(old.info));
+            self.pending_events
+                .push(ProcessEvent::ProcessUnverified(old.info));
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    fn handle_discovery_event_fork_thread(&mut self, event: NetlinkProcessForkEvent) {
+        let process_id = ProcessId(event.child_tgid);
+
+        if let Some(process) = self.processes.get_mut(&process_id)
+            && event.ts_boot_ticks >= process.info.start_time
+        {
+            if !self.scans.is_empty() {
+                self.scan_touched.insert(process_id);
+            }
+            let thread = ThreadId {
+                pid: event.child_tgid,
+                tid: event.child_pid,
+            };
+            if process.threads.insert(thread) {
+                self.pending_events
+                    .push(ProcessEvent::ThreadStarted(thread));
+            }
         }
     }
 
@@ -322,20 +369,46 @@ impl ProcessWorker {
             self.scan_touched.insert(process_id);
         }
 
-        if let Some(process) = self.processes.get_mut(&process_id) {
-            if event.ts_boot_ticks >= process.start_time {
-                if event.exit_result.is_err() {
-                    process.exit_result = Some(event.exit_result);
+        // exit of an unknown thread group suppresses its entry of a running scan,
+        // so its info is updated now to not delay discovery of a still alive process
+        let tracked = self.processes.contains_key(&process_id);
+        if !tracked && !self.unverified_processes.contains_key(&process_id) {
+            let found = self.update_process_by_pid(process_id).await;
+
+            // process exited before it was discovered, so its start time is unknown,
+            // unless it was already removed from /proc when processing previous events
+            if is_main_thread && !found {
+                if self.finished_processes.remove(&process_id).is_none() {
+                    self.pending_events
+                        .push(ProcessEvent::ProcessUnverified(ProcessInfo {
+                            pid: process_id,
+                            command: UNVERIFIED_PROCESS_COMMAND.to_string(),
+                            start_time: event.ts_boot_ticks,
+                            exit_result: Some(event.exit_result),
+                        }));
                 }
-                if is_main_thread && process.exit_result.is_none() {
-                    process.exit_result = Some(event.exit_result);
-                }
+                return;
+            }
+        }
+
+        if let Some(process) = self.processes.get_mut(&process_id)
+            && event.ts_boot_ticks >= process.info.start_time
+        {
+            // main thread status is provisional, later thread exits override it
+            if event.exit_result.is_err() || is_main_thread || process.info.exit_result.is_some() {
+                process.info.exit_result = Some(event.exit_result);
+            }
+            let thread = ThreadId {
+                pid: event.process_tgid,
+                tid: event.process_pid,
+            };
+            if !is_main_thread && process.threads.remove(&thread) {
+                self.pending_events
+                    .push(ProcessEvent::ThreadFinished(thread));
+            }
+            if tracked {
                 self.update_process_by_pid(process_id).await;
             }
-        } else if !self.unverified_processes.contains_key(&process_id) {
-            // exit of an unknown thread group suppresses its entry of a running scan,
-            // so its info is updated to not delay discovery of a still alive process
-            self.update_process_by_pid(process_id).await;
         }
 
         if is_main_thread
@@ -344,7 +417,12 @@ impl ProcessWorker {
         {
             let mut process = e.remove().info;
             process.exit_result = Some(event.exit_result);
-            self.pending_events.push(ProcessEvent::Unverified(process));
+            self.pending_events
+                .push(ProcessEvent::ProcessUnverified(process));
+        }
+
+        if is_main_thread {
+            self.finished_processes.remove(&process_id);
         }
     }
 
@@ -361,7 +439,10 @@ impl ProcessWorker {
             .processes
             .extract_if(|e, _| !scanned.contains_key(e) && !scan_touched.contains(e))
         {
-            self.pending_events.push(ProcessEvent::Finished(process));
+            self.finished_processes
+                .insert(process.info.pid, Instant::now());
+            self.pending_events
+                .push(ProcessEvent::ProcessFinished(process.info));
         }
 
         for (pid, process) in scanned {
@@ -375,12 +456,17 @@ impl ProcessWorker {
 
     ////////////////////////////////////////////////////////////////////////////////
     fn handle_unverified_processes_timeout(&mut self) {
-        let expired = self
+        self.finished_processes
+            .retain(|_, e| e.elapsed() < UNVERIFIED_PROCESS_TIMEOUT);
+
+        for (pid, e) in self
             .unverified_processes
             .extract_if(|_, e| e.created_at.elapsed() >= UNVERIFIED_PROCESS_TIMEOUT)
-            .map(|e| ProcessEvent::Unverified(e.1.info));
-
-        self.pending_events.extend(expired);
+        {
+            self.finished_processes.insert(pid, Instant::now());
+            self.pending_events
+                .push(ProcessEvent::ProcessUnverified(e.info));
+        }
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -394,15 +480,42 @@ impl ProcessWorker {
         // main thread exit event and app still runs, it will be removed on the next full scan.
         // this is a compromise with missing error code (when /proc reaped before exit event).
 
-        match read_process_info(pid).await {
+        let task = tokio::task::spawn_blocking(move || {
+            // `None` marks a process that disappeared or completed
+            let (process, stat) = match Process::new(pid.0).and_then(|e| e.stat().map(|s| (e, s))) {
+                Ok(e) => e,
+                Err(ProcError::NotFound(_)) => return Ok(None),
+                Err(e) => return Err(anyhow::Error::from(e)),
+            };
+
+            let info = parse_process_info_from_stat_if_alive(pid, stat);
+            Ok(info.map(|e| VerifiedProcessInfo {
+                info: e,
+                threads: read_process_threads(&process),
+            }))
+        });
+
+        let result = match task.await {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("task failed to read process {pid} info: {e}");
+                return self.processes.contains_key(&pid);
+            }
+        };
+
+        match result {
             Ok(Some(process)) => {
                 self.update_process_by_info(process);
             }
             Ok(None) => {
-                if let Some(process) = self.processes.remove(&pid)
-                    && process.exit_result.is_some()
-                {
-                    self.pending_events.push(ProcessEvent::Finished(process));
+                // entry without exit code is kept until exit event or full scan
+                if let Entry::Occupied(e) = self.processes.entry(pid) {
+                    if e.get().info.exit_result.is_none() {
+                        return true;
+                    }
+                    self.finished_processes.insert(pid, Instant::now());
+                    self.pending_events
+                        .push(ProcessEvent::ProcessFinished(e.remove().info));
                 }
                 return false;
             }
@@ -415,29 +528,54 @@ impl ProcessWorker {
     }
 
     ////////////////////////////////////////////////////////////////////////////////
-    fn update_process_by_info(&mut self, process: ProcessInfo) {
+    fn update_process_by_info(&mut self, process: VerifiedProcessInfo) {
+        // 1.
         // real start time never exceeds the unverified start time of the same process,
         // so a later start time always belongs to a newer pid owner
 
-        if let Some(e) = self.unverified_processes.remove(&process.pid)
-            && process.start_time > e.info.start_time
+        // 2.
+        // empty thread list means it could not be read, which is not a proof of thread exit
+
+        if let Some(e) = self.unverified_processes.remove(&process.info.pid)
+            && process.info.start_time > e.info.start_time
         {
-            self.pending_events.push(ProcessEvent::Unverified(e.info));
+            self.pending_events
+                .push(ProcessEvent::ProcessUnverified(e.info));
         }
 
-        match self.processes.entry(process.pid) {
+        match self.processes.entry(process.info.pid) {
             Entry::Occupied(mut e) => {
-                if e.get().start_time == process.start_time {
-                    e.get_mut().command = process.command;
+                if e.get().info.start_time == process.info.start_time {
+                    let tracked = e.into_mut();
+                    tracked.info.command = process.info.command;
+
+                    if !process.threads.is_empty() {
+                        for thread in process.threads.difference(&tracked.threads) {
+                            self.pending_events
+                                .push(ProcessEvent::ThreadStarted(*thread));
+                        }
+                        for thread in tracked.threads.difference(&process.threads) {
+                            self.pending_events
+                                .push(ProcessEvent::ThreadFinished(*thread));
+                        }
+                        tracked.threads = process.threads;
+                    }
                 } else {
                     let old = e.insert(process.clone());
-                    self.pending_events.push(ProcessEvent::Finished(old));
-                    self.pending_events.push(ProcessEvent::Started(process));
+                    self.pending_events
+                        .push(ProcessEvent::ProcessFinished(old.info));
+                    self.pending_events
+                        .push(ProcessEvent::ProcessStarted(process.info));
+                    self.pending_events
+                        .extend(process.threads.into_iter().map(ProcessEvent::ThreadStarted));
                 }
             }
             Entry::Vacant(e) => {
                 e.insert(process.clone());
-                self.pending_events.push(ProcessEvent::Started(process));
+                self.pending_events
+                    .push(ProcessEvent::ProcessStarted(process.info));
+                self.pending_events
+                    .extend(process.threads.into_iter().map(ProcessEvent::ThreadStarted));
             }
         }
     }
@@ -458,7 +596,8 @@ fn scan_processes() -> ScanResult {
         match process.stat() {
             Ok(stat) => {
                 if let Some(info) = parse_process_info_from_stat_if_alive(pid, stat) {
-                    scanned.insert(pid, Some(info));
+                    let threads = read_process_threads(&process);
+                    scanned.insert(pid, Some(VerifiedProcessInfo { info, threads }));
                 }
             }
             Err(ProcError::NotFound(_)) => {}
@@ -470,18 +609,25 @@ fn scan_processes() -> ScanResult {
     Ok(scanned)
 }
 
-/// Reads info about a single process
-/// `None` marks a process that disappeared or completed, any other read failure is reported as error
-async fn read_process_info(pid: ProcessId) -> anyhow::Result<Option<ProcessInfo>> {
-    let task = tokio::task::spawn_blocking(move || {
-        let stat = match Process::new(pid.0).and_then(|e| e.stat()) {
+/// Reads all process threads
+/// empty set marks a thread list that could not be fully read, which is not a proof of thread exit
+fn read_process_threads(process: &Process) -> HashSet<ThreadId> {
+    let mut threads = HashSet::new();
+    let Ok(tasks) = process.tasks() else {
+        return threads;
+    };
+    for task in tasks {
+        let task = match task {
             Ok(e) => e,
-            Err(ProcError::NotFound(_)) => return Ok(None),
-            Err(e) => return Err(e.into()),
+            Err(ProcError::NotFound(_)) => continue,
+            Err(_) => return HashSet::new(),
         };
-        Ok(parse_process_info_from_stat_if_alive(pid, stat))
-    });
-    task.await?
+        threads.insert(ThreadId {
+            pid: task.pid,
+            tid: task.tid,
+        });
+    }
+    threads
 }
 
 /// Builds process info from its thread group main thread stat
