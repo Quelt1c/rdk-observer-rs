@@ -15,3 +15,77 @@
 //! when configured; counter resets, missing targets, or identity changes will
 //! invalidate affected deltas. Filesystem capacity and free space are outside
 //! ADR-0001's scope.
+
+use anyhow::Context;
+use procfs::diskstats;
+use procfs::process::Process;
+
+use crate::output_model::{
+    BlockDeviceIdentity, StorageCounters, StorageRecord, SystemStorageCounters, SystemStorageRecord,
+};
+
+/// Reads storage I/O counters for block devices from `/proc/diskstats`.
+///
+/// Partition devices are skipped using sysfs. Rates are not calculated here.
+pub fn read_system_io() -> anyhow::Result<Vec<SystemStorageRecord>> {
+    let disk_stats = diskstats().context("failed to read /proc/diskstats")?;
+
+    let mut system_storage_records = Vec::new();
+
+    for disk_stat in disk_stats {
+        let major = disk_stat.major;
+        let minor = disk_stat.minor;
+
+        let partition_path = format!("/sys/dev/block/{major}:{minor}/partition");
+        match std::path::Path::new(&partition_path).try_exists() {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    path = %partition_path,
+                    "failed to inspect partition marker"
+                );
+                continue;
+            }
+        }
+
+        system_storage_records.push(SystemStorageRecord {
+            device_identity: BlockDeviceIdentity {
+                major: major.cast_unsigned(),
+                minor: minor.cast_unsigned(),
+                name: disk_stat.name,
+            },
+            counters: SystemStorageCounters {
+                read_operations: Some(disk_stat.reads),
+                write_operations: Some(disk_stat.writes),
+                read_sectors: Some(disk_stat.sectors_read),
+                write_sectors: Some(disk_stat.sectors_written),
+            },
+            rates: None,
+        });
+    }
+
+    Ok(system_storage_records)
+}
+
+/// Reads process-wide storage I/O counters from `/proc/<pid>/io`.
+///
+/// Rates are not calculated here.
+pub fn read_process_io(pid: i32) -> anyhow::Result<StorageRecord> {
+    let process = Process::new(pid).with_context(|| format!("failed to open process {pid}"))?;
+
+    let io = process
+        .io()
+        .with_context(|| format!("failed to read /proc/{pid}/io"))?;
+
+    Ok(StorageRecord {
+        counters: StorageCounters {
+            read_bytes: Some(io.read_bytes),
+            write_bytes: Some(io.write_bytes),
+            read_syscalls: Some(io.syscr),
+            write_syscalls: Some(io.syscw),
+        },
+        rates: None,
+    })
+}
