@@ -427,12 +427,15 @@ impl ProcessWorker {
     }
 
     ////////////////////////////////////////////////////////////////////////////////
-    fn handle_scan_finished(&mut self, result: Result<ScanResult, JoinError>) {
+    fn handle_scan_finished(&mut self, join_result: Result<ScanResult, JoinError>) {
         let scan_touched = std::mem::take(&mut self.scan_touched);
-        let scanned = match result {
-            Ok(Ok(e)) => e,
-            Ok(Err(e)) => return error!("process scan failed: {e}"),
+        let task_result = match join_result {
+            Ok(e) => e,
             Err(e) => return error!("process scan task failed: {e}"),
+        };
+        let scanned = match task_result {
+            Ok(e) => e,
+            Err(e) => return error!("process scan failed: {e}"),
         };
 
         for (_, process) in self
