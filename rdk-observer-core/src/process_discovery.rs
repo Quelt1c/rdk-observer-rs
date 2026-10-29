@@ -349,13 +349,13 @@ fn monotonic_ns_to_boot_ticks(monotonic_ns: u64) -> u64 {
         s.saturating_mul(1_000_000_000).saturating_add(ns)
     }
 
-    let ns_to_ticks = *NS_TO_TICKS.get_or_init(|| 1_000_000_000 / procfs::ticks_per_second());
+    let ticks_per_second = *NS_TO_TICKS.get_or_init(procfs::ticks_per_second);
     let base_boot_time = clock_gettime(ClockId::Boottime);
     let base_monotonic = clock_gettime(ClockId::Monotonic);
 
-    let time = monotonic_ns
+    let time_ns = monotonic_ns
         .saturating_add(timespec_to_ns(base_boot_time))
         .saturating_sub(timespec_to_ns(base_monotonic));
 
-    time / ns_to_ticks
+    (u128::from(time_ns) * u128::from(ticks_per_second) / 1_000_000_000) as u64
 }
