@@ -15,3 +15,4 @@ libc.workspace = true
 futures.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+aya = "0.16"
