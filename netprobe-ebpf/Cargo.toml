@@ -1,0 +1,10 @@
+[package]
+name = "netprobe-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = "0.2.1"
+[[bin]]
+name = "netprobe-ebpf"
+path = "src/main.rs"
