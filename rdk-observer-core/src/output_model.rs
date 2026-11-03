@@ -35,6 +35,8 @@ pub enum SystemResourceRecord {
     Memory(SystemMemoryRecord),
     /// Storage I/O measurements for selected block devices; avoid counting disks and partitions twice.
     Storage(Vec<SystemStorageRecord>),
+    /// Network traffic measurements across monitored interfaces from `/proc/net/dev`.
+    Network(Vec<SystemNetworkRecord>),
 }
 
 /// Aggregate CPU counters from `/proc/stat` with optional derived utilization.
@@ -296,4 +298,52 @@ pub struct ThreadRecord {
     pub cpu: Option<CpuRecord>,
     /// Optional storage I/O counters and transfer rates for this thread.
     pub storage: Option<StorageRecord>,
+}
+
+// -----------------------------------------------------------------------------
+// System network record
+// -----------------------------------------------------------------------------
+
+/// Network traffic counters from `/proc/net/dev` and optional rates for one interface.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemNetworkRecord {
+    /// Kernel network interface name, such as `eth0` or `wlan0`.
+    pub name: String,
+    /// Cumulative byte, packet, drop, and error counters for this interface.
+    pub counters: InterfaceCounters,
+    /// Byte rates derived from two valid samples of the same interface.
+    /// `None` means rates are unavailable, such as on the first sample or after an interface reset.
+    pub rates: Option<NetworkRates>,
+}
+
+/// Cumulative byte, packet, drop, and error counters for a network interface.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InterfaceCounters {
+    /// Total bytes received on this interface.
+    pub rx_bytes: u64,
+    /// Total bytes transmitted on this interface.
+    pub tx_bytes: u64,
+    /// Total packets received on this interface.
+    pub rx_packets: u64,
+    /// Total packets transmitted on this interface.
+    pub tx_packets: u64,
+    /// Total receive errors detected on this interface.
+    pub rx_errors: u64,
+    /// Total transmit errors detected on this interface.
+    pub tx_errors: u64,
+    /// Total dropped incoming packets on this interface.
+    pub rx_dropped: u64,
+    /// Total dropped outgoing packets on this interface.
+    pub tx_dropped: u64,
+}
+
+/// Receive and transmit byte rates over a sampling interval in nanoseconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NetworkRates {
+    /// Elapsed time between the samples used to calculate rates, in nanoseconds.
+    pub interval_ns: u64,
+    /// Average bytes received per second over the interval, when available.
+    pub rx_bytes_per_second: Option<f64>,
+    /// Average bytes transmitted per second over the interval, when available.
+    pub tx_bytes_per_second: Option<f64>,
 }
