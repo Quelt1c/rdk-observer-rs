@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["rdk-observer", "rdk-observer-core"]
+members = ["rdk-observer", "rdk-observer-core", "rdk-observer-ebpf"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,3 +18,5 @@ futures = "0.3.34"
 anyhow = "1"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+aya = "0.16"
+aya-ebpf = "0.2.1"

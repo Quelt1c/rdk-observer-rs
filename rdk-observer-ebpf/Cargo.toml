@@ -1,0 +1,10 @@
+[package]
+name = "rdk-observer-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf.workspace = true
+[[bin]]
+name = "netprobe-ebpf"
+path = "src/main.rs"
