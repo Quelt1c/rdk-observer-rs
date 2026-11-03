@@ -35,6 +35,8 @@ pub enum SystemResourceRecord {
     Memory(SystemMemoryRecord),
     /// Storage I/O measurements for selected block devices; avoid counting disks and partitions twice.
     Storage(Vec<SystemStorageRecord>),
+    /// Process network traffic captured via eBPF/kretprobes.
+    Network(ProcessNetworkRecord),
 }
 
 /// Aggregate CPU counters from `/proc/stat` with optional derived utilization.
@@ -296,4 +298,45 @@ pub struct ThreadRecord {
     pub cpu: Option<CpuRecord>,
     /// Optional storage I/O counters and transfer rates for this thread.
     pub storage: Option<StorageRecord>,
+}
+
+// -----------------------------------------------------------------------------
+// Process Network record
+// -----------------------------------------------------------------------------
+
+/// Cumulative network traffic counters and derived transfer rates for a process.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessNetworkRecord {
+    /// Cumulative socket I/O byte counters.
+    pub counters: ProcessNetworkCounters,
+    /// Byte rates derived from two valid consecutive samples of the same process.
+    pub rates: Option<ProcessNetworkRates>,
+}
+
+/// Cumulative TCP and UDP byte counters attributed to a process.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessNetworkCounters {
+    /// Cumulative bytes received over TCP sockets, when available.
+    pub tcp_rx_bytes: Option<u64>,
+    /// Cumulative bytes transmitted over TCP sockets, when available.
+    pub tcp_tx_bytes: Option<u64>,
+    /// Cumulative bytes received over UDP sockets, when available.
+    pub udp_rx_bytes: Option<u64>,
+    /// Cumulative bytes transmitted over UDP sockets, when available.
+    pub udp_tx_bytes: Option<u64>,
+}
+
+/// Transfer rates in bytes per second for a process over a sampling interval.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProcessNetworkRates {
+    /// Elapsed time between samples in nanoseconds.
+    pub interval_ns: u64,
+    /// Average TCP bytes received per second.
+    pub tcp_rx_bytes_per_second: Option<f64>,
+    /// Average TCP bytes transmitted per second.
+    pub tcp_tx_bytes_per_second: Option<f64>,
+    /// Average UDP bytes received per second.
+    pub udp_rx_bytes_per_second: Option<f64>,
+    /// Average UDP bytes transmitted per second.
+    pub udp_tx_bytes_per_second: Option<f64>,
 }
