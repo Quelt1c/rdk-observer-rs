@@ -1,11 +1,12 @@
-//! Executable entry point for RDK Observer.
-//!
-//! Keep worker orchestration in the library's `runtime` module. Argument parsing,
-//! configuration loading, and logging initialization will be added here before
-//! handing control to the runtime once those interfaces are defined.
-
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
+use procfs::process::Process;
+use rdk_observer_core::page_fault_probe::{
+    PageFaultBucket, PageFaultProbe, read_process_starttime,
+};
+use std::time::{Duration, Instant};
+use tokio::time::MissedTickBehavior;
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
@@ -30,12 +31,20 @@ struct Args {
     /// Exclude userspace processes
     #[arg(long)]
     no_userspace_processes: bool,
+    /// Enable eBPF per-thread page fault capture for specified --pid targets
+    #[arg(long)]
+    page_faults: bool,
+    /// Aggregation bucket interval in milliseconds
+    #[arg(long, default_value_t = 1000, value_name = "MS")]
+    pf_bucket_ms: u64,
+    /// Maximum capture duration in seconds
+    #[arg(long, default_value_t = 10, value_name = "SECS")]
+    pf_duration_secs: u64,
 }
 
 #[tokio::main]
 async fn main() {
-    // TODO(#9): pass arguments to `runtime::run()` when implemented.
-    let _args = parse_arguments();
+    let args = parse_arguments();
 
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
@@ -47,24 +56,133 @@ async fn main() {
         )
         .init();
 
+    if args.page_faults {
+        let bucket_interval = Duration::from_millis(args.pf_bucket_ms);
+        let max_duration = Duration::from_secs(args.pf_duration_secs);
+
+        if let Err(err) = run_page_fault_capture(&args.pid, bucket_interval, max_duration).await {
+            error!(error = %err, "Page fault capture failed");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     rdk_observer_core::runtime::run().await;
 }
 
-/// Validate arguments combination that clap cannot express declaratively
 fn parse_arguments() -> Args {
     let args = Args::parse();
 
-    // excluding both process kinds only makes sense when some inclusion is also present
     if args.no_kernel_threads
         && args.no_userspace_processes
         && args.pid.is_empty()
         && args.command.is_empty()
         && !args.rdk_processes
     {
-        Args::command().error(
-            ErrorKind::ArgumentConflict,
-            "'--no-kernel-threads' and '--no-userspace-processes' together require at least one '--pid', '--command' or `rdk-processes`",
-        ).exit();
+        Args::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                "'--no-kernel-threads' and '--no-userspace-processes' together require at least one '--pid', '--command' or `rdk-processes`",
+            )
+            .exit();
     }
+
+    if args.page_faults && args.pid.is_empty() {
+        Args::command()
+            .error(
+                ErrorKind::MissingRequiredArgument,
+                "'--page-faults' requires at least one '--pid <PID>'",
+            )
+            .exit();
+    }
+
     args
+}
+
+async fn run_page_fault_capture(
+    target_pids: &[u32],
+    bucket_interval: Duration,
+    max_duration: Duration,
+) -> anyhow::Result<()> {
+    let mut probe = PageFaultProbe::attach_to_all_cpus()?;
+
+    for &pid in target_pids {
+        let starttime = read_process_starttime(pid)?;
+        probe.start_tracking_pid(pid, starttime)?;
+        let rss_bytes = read_process_rss_bytes(pid);
+        info!(pid, starttime, rss_bytes, "Tracking process page faults");
+    }
+
+    let deadline = Instant::now() + max_duration;
+    let mut ticker = tokio::time::interval(bucket_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ticker.tick().await;
+
+    let mut bucket_index: u64 = 0;
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Ctrl+C received, stopping capture");
+                break;
+            }
+            _ = ticker.tick() => {
+                bucket_index += 1;
+                let bucket = probe.collect_and_reset_bucket()?;
+                report_bucket(bucket_index, target_pids, &bucket);
+
+                if Instant::now() >= deadline {
+                    info!("Max capture duration reached");
+                    break;
+                }
+            }
+        }
+    }
+
+    for &pid in target_pids {
+        if let Err(err) = probe.stop_tracking_pid(pid) {
+            warn!(pid, error = %err, "Failed to untrack PID");
+        }
+    }
+
+    drop(probe);
+    info!("All eBPF probes and perf events detached");
+    Ok(())
+}
+
+fn report_bucket(bucket_index: u64, target_pids: &[u32], bucket: &PageFaultBucket) {
+    for &pid in target_pids {
+        let rss_bytes = read_process_rss_bytes(pid);
+        info!(
+            bucket = bucket_index,
+            monotonic_ns = bucket.monotonic_ns,
+            pid,
+            rss_bytes,
+            dropped_faults = bucket.dropped_faults,
+            "RSS sample (separate from fault counts)"
+        );
+    }
+
+    for thread in &bucket.threads {
+        info!(
+            bucket = bucket_index,
+            monotonic_ns = bucket.monotonic_ns,
+            pid = thread.pid,
+            tid = thread.tid,
+            minor_faults = thread.minor_faults,
+            major_faults = thread.major_faults,
+            "Thread page faults"
+        );
+    }
+}
+
+fn read_process_rss_bytes(pid: u32) -> u64 {
+    let page_size = rustix::param::page_size() as u64;
+    let Ok(process) = Process::new(pid as i32) else {
+        return 0;
+    };
+    let Ok(statm) = process.statm() else {
+        return 0;
+    };
+    statm.resident * page_size
 }

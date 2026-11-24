@@ -40,6 +40,7 @@ pub mod output_encoding;
 pub mod output_model;
 pub mod output_storage;
 pub mod output_worker;
+pub mod page_fault_probe;
 pub mod process_discovery;
 pub mod process_registry;
 pub mod process_worker;

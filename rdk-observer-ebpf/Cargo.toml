@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 aya-ebpf.workspace = true
+
 [[bin]]
-name = "netprobe-ebpf"
-path = "src/main.rs"
+name = "pagefault-ebpf"
+path = "src/page_faults.rs"

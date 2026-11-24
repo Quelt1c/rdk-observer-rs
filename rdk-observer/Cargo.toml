@@ -1,13 +1,14 @@
 [package]
 name = "rdk-observer"
-description = "System process observer for RDK devices"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-publish = false
+version = "0.1.0"
+edition = "2024"
 
 [dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+procfs = "0.18"
 rdk-observer-core = { path = "../rdk-observer-core" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
-clap = { workspace = true, features = ["derive"] }
+rustix = { version = "1", features = ["param"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
